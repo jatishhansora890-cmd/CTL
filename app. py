@@ -1,110 +1,30 @@
-import streamlit as st
-import pandas as pd
+from flask import Flask, render_template, request, jsonify
 import firebase_admin
 from firebase_admin import credentials, firestore
 import json
+import os
 
-# --- 1. ROBUST FIREBASE CONNECTION ---
-@st.cache_resource
-def get_db():
-    """Initializes Firebase once and caches the connection."""
-    if not firebase_admin._apps:
-        try:
-            # For deployment: uses the 'Secrets' you will set in the dashboard
-            key_dict = json.loads(st.secrets["FIREBASE_KEY"])
-            cred = credentials.Certificate(key_dict)
-            firebase_admin.initialize_app(cred)
-        except Exception as e:
-            st.error(f"Firebase Config Error: {e}")
-            return None
-    return firestore.client()
+app = Flask(__name__)
 
-db = get_db()
+# Firebase Setup
+if not firebase_admin._apps:
+    # On Vercel, we will put the JSON string in an Environment Variable
+    key_dict = json.loads(os.environ.get("FIREBASE_KEY"))
+    cred = credentials.Certificate(key_dict)
+    firebase_admin.initialize_app(cred)
 
-# --- 2. PAGE UI CONFIG ---
-st.set_page_config(page_title="Slitting Tracker", page_icon="🏭", layout="wide")
+db = firestore.client()
 
-st.markdown("""
-    <style>
-    .main { background-color: #f5f7f9; }
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #007bff; color: white; }
-    </style>
-    """, unsafe_allow_html=True)
+@app.route('/')
+def index():
+    return render_template('index.html')
 
-st.title("🏭 Slitting Machine Production Tracker")
+@app.route('/log_production', methods=['POST'])
+def log_production():
+    data = request.json
+    db.collection("production_logs").add(data)
+    return jsonify({"status": "success"})
 
-if db is None:
-    st.warning("Waiting for Database Connection...")
-    st.stop()
-
-tab_op, tab_admin = st.tabs(["Worker Interface", "Admin Dashboard"])
-
-# --- 3. ADMIN DASHBOARD (Master Data) ---
-with tab_admin:
-    st.header("Admin: Set Cutting Rules")
-    with st.form("rule_form", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        in_width = col1.number_input("Coil Width (mm)", min_value=0.0, format="%.2f")
-        out_size = col2.text_input("Allowed CTL Size (e.g. 767*1283 mm)")
-        
-        if st.form_submit_button("ADD MASTER RULE"):
-            if in_width > 0 and out_size:
-                db.collection("rules").add({"coil_width": in_width, "ctl_size": out_size})
-                st.success(f"Rule for {in_width}mm saved!")
-            else:
-                st.error("Please enter valid width and size.")
-
-    st.subheader("Current Master Rules")
-    rules_ref = db.collection("rules").stream()
-    rules_list = [r.to_dict() for r in rules_ref]
-    if rules_list:
-        st.dataframe(pd.DataFrame(rules_list), use_container_width=True)
-
-# --- 4. WORKER INTERFACE (Shop Floor) ---
-with tab_op:
-    st.header("Step 1: Scan Coil Tag")
-    cam_image = st.camera_input("Take photo of Vendor Tag")
-
-    # This is the 'Logic Gate'
-    if cam_image:
-        with st.spinner("Analyzing Tag..."):
-            # PROTOTYPE OCR MOCK: In production, we plug the Vision API here.
-            # We assume it detected your test case: 776mm
-            detected_width = 776.0 
-            detected_weight = 4850.0 # Mock weight
-            
-            st.session_state.current_coil = {"width": detected_width, "weight": detected_weight}
-            st.info(f"✅ DETECTED: {detected_width}mm Width | {detected_weight}kg Weight")
-
-    st.divider()
-
-    if 'current_coil' in st.session_state:
-        st.header("Step 2: Log Production")
-        active_w = st.session_state.current_coil['width']
-        
-        # Query matching rules from Firebase
-        query = db.collection("rules").where("coil_width", "==", active_w).stream()
-        options = [r.to_dict()['ctl_size'] for r in query]
-        
-        if options:
-            selected_size = st.selectbox("Select CTL Size Produced", options)
-            count = st.number_input("Enter Final Production Count", min_value=1, step=1)
-            
-            if st.button("SUBMIT PRODUCTION LOG"):
-                try:
-                    db.collection("production_logs").add({
-                        "timestamp": firestore.SERVER_TIMESTAMP,
-                        "input_width": active_w,
-                        "input_weight": st.session_state.current_coil['weight'],
-                        "ctl_size": selected_size,
-                        "production_count": count,
-                        "status": "Completed"
-                    })
-                    st.success("✅ Logged Successfully to Database!")
-                    # Clear session for next coil
-                    del st.session_state.current_coil
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Logging Failed: {e}")
-        else:
-            st.error(f"⚠️ No rules found for {active_w}mm width. Please ask Admin to add this width.")
+# This is what Vercel needs to see!
+if __name__ == "__main__":
+    app.run()
