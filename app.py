@@ -4,68 +4,68 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import json
 
-# --- 1. FIREBASE SETUP ---
+# 1. Database Connection (Secure)
 @st.cache_resource
 def get_db():
     if not firebase_admin._apps:
         try:
-            # This looks for the 'Secret' you added in Streamlit settings
+            # Vercel will look for this in its Environment Variables
             key_dict = json.loads(st.secrets["FIREBASE_KEY"])
             cred = credentials.Certificate(key_dict)
             firebase_admin.initialize_app(cred)
         except Exception as e:
-            st.error(f"Database Config Missing: {e}")
+            st.error(f"Database Error: {e}")
             return None
     return firestore.client()
 
 db = get_db()
 
-# --- 2. APP UI ---
 st.set_page_config(page_title="Slitting Tracker", layout="wide")
 st.title("🏭 Slitting Machine Production Tracker")
 
 if db is None:
-    st.warning("Please add your FIREBASE_KEY in 'Advanced Settings > Secrets'.")
+    st.warning("Awaiting database credentials...")
     st.stop()
 
-tab_op, tab_admin = st.tabs(["Worker Interface", "Admin Dashboard"])
+tab_worker, tab_admin = st.tabs(["Worker Interface", "Admin Dashboard"])
 
-# --- ADMIN TAB ---
+# --- ADMIN: Master Data ---
 with tab_admin:
     st.header("Admin: Set Cutting Rules")
-    with st.form("rule_form"):
+    with st.form("add_rule"):
         col1, col2 = st.columns(2)
-        in_width = col1.number_input("Coil Width (mm)", min_value=0.0)
-        out_size = col2.text_input("Allowed CTL Size (e.g. 767*1283)")
-        if st.form_submit_button("SAVE RULE"):
-            db.collection("rules").add({"coil_width": in_width, "ctl_size": out_size})
-            st.success("Rule Saved!")
+        in_w = col1.number_input("Coil Width (mm)", min_value=0.0)
+        out_s = col2.text_input("Allowed CTL Size (e.g. 767*1283 mm)")
+        if st.form_submit_button("Save Rule"):
+            db.collection("rules").add({"coil_width": in_w, "ctl_size": out_s})
+            st.success(f"Saved: {in_w}mm -> {out_s}")
 
-# --- WORKER TAB ---
-with tab_op:
+# --- WORKER: Shop Floor Logic ---
+with tab_worker:
     st.header("1. Coil Intake")
-    cam_image = st.camera_input("Scan Coil Tag")
-    if cam_image:
-        # Mock detection for prototype
-        st.session_state.current_width = 776.0
-        st.success(f"Detected Width: {st.session_state.current_width}mm")
+    cam = st.camera_input("Scan Tag")
+    if cam:
+        # Prototype Mock: In future, we add OCR here
+        st.session_state.detected_w = 776.0
+        st.info(f"Detected: {st.session_state.detected_w} mm")
 
-    if 'current_width' in st.session_state:
+    if 'detected_w' in st.session_state:
         st.header("2. Production Entry")
-        w = st.session_state.current_width
+        w = st.session_state.detected_w
         rules = db.collection("rules").where("coil_width", "==", w).stream()
         options = [r.to_dict()['ctl_size'] for r in rules]
         
         if options:
-            selected = st.selectbox("Select CTL Size", options)
-            count = st.number_input("Production Count", min_value=1)
-            if st.button("SUBMIT LOG"):
+            sel = st.selectbox("Select CTL Size", options)
+            qty = st.number_input("Count", min_value=1)
+            if st.button("Log Production"):
                 db.collection("production_logs").add({
                     "timestamp": firestore.SERVER_TIMESTAMP,
                     "width": w,
-                    "ctl_size": selected,
-                    "count": count
+                    "size": sel,
+                    "qty": qty
                 })
-                st.success("Logged Successfully!")
+                st.success("Data Logged!")
+                del st.session_state.detected_w
         else:
-            st.error(f"No rules found for {w}mm.")
+            st.error(f"No rule for {w}mm. Contact Admin.")
